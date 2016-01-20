@@ -22,7 +22,7 @@ def pip(filename):
 
 setup(
     name='djangotables',
-    version='1.0',
+    version='1.1',
     description='Django + Datatables',
     url='https://github.com/c475/djangotables',
     author='Cobras',
