@@ -57,6 +57,9 @@ class DatatablesView(MultipleObjectMixin, View):
     fields = []
     _db_fields = None
 
+    # default database, can override
+    DATABASE = 'default'
+
     def post(self, request, *args, **kwargs):
         return self.process_dt_response(request.POST)
 
@@ -135,12 +138,12 @@ class DatatablesView(MultipleObjectMixin, View):
                 ]
                 if len(criterions) > 0:
                     search = reduce(or_, criterions)
-                    queryset = queryset.filter(search)
+                    queryset = queryset.using(self.DATABASE).filter(search)
             else:
                 for term in search.split():
                     criterions = (Q(**{'%s__icontains' % field: term}) for field in self.get_db_fields())
                     search = reduce(or_, criterions)
-                    queryset = queryset.filter(search)
+                    queryset = queryset.using(self.DATABASE).filter(search)
         return queryset
 
     def column_search(self, queryset):
@@ -158,12 +161,12 @@ class DatatablesView(MultipleObjectMixin, View):
                         criterions = [Q(**{'%s__iregex' % field: search}) for field in fields if self.can_regex(field)]
                         if len(criterions) > 0:
                             search = reduce(or_, criterions)
-                            queryset = queryset.filter(search)
+                            queryset = queryset.using(self.DATABASE).filter(search)
                     else:
                         for term in search.split():
                             criterions = (Q(**{'%s__icontains' % field: term}) for field in fields)
                             search = reduce(or_, criterions)
-                            queryset = queryset.filter(search)
+                            queryset = queryset.using(self.DATABASE).filter(search)
         return queryset
 
     def get_queryset(self):
