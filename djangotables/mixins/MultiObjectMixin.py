@@ -15,7 +15,7 @@ class MultiObjectMixin(MultipleObjectMixin):
                 queryset = queryset.all()
         elif self.model is not None:
             if hasattr(self, 'database'):
-                queryset = self.model._default_manager.using(self.DATABASE).all()
+                queryset = self.model._default_manager.using(self.database).all()
             else:
                 queryset = self.model._default_manager.all()
         else:
