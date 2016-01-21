@@ -13,8 +13,8 @@ from django.http import HttpResponse, HttpResponseBadRequest
 from django.utils.six import text_type
 from django.utils.six.moves import reduce, xrange
 from django.views.generic import View
-from django.views.generic.list import MultipleObjectMixin
 
+from djangotables.mixins.MultiObjectMixin import MultiObjectMixin
 from djangotables.forms import DatatablesForm, DESC
 
 
@@ -48,7 +48,7 @@ def get_real_field(model, field_name):
         raise Exception('Unhandled field: %s' % field_name)
 
 
-class DatatablesView(MultipleObjectMixin, View):
+class DatatablesView(MultiObjectMixin, View):
     '''
     Render a paginated server-side Datatables JSON view.
 
@@ -56,9 +56,6 @@ class DatatablesView(MultipleObjectMixin, View):
     '''
     fields = []
     _db_fields = None
-
-    # default database, can override
-    DATABASE = 'default'
 
     def post(self, request, *args, **kwargs):
         return self.process_dt_response(request.POST)
@@ -138,12 +135,12 @@ class DatatablesView(MultipleObjectMixin, View):
                 ]
                 if len(criterions) > 0:
                     search = reduce(or_, criterions)
-                    queryset = queryset.using(self.DATABASE).filter(search)
+                    queryset = queryset.filter(search)
             else:
                 for term in search.split():
                     criterions = (Q(**{'%s__icontains' % field: term}) for field in self.get_db_fields())
                     search = reduce(or_, criterions)
-                    queryset = queryset.using(self.DATABASE).filter(search)
+                    queryset = queryset.filter(search)
         return queryset
 
     def column_search(self, queryset):
@@ -161,12 +158,12 @@ class DatatablesView(MultipleObjectMixin, View):
                         criterions = [Q(**{'%s__iregex' % field: search}) for field in fields if self.can_regex(field)]
                         if len(criterions) > 0:
                             search = reduce(or_, criterions)
-                            queryset = queryset.using(self.DATABASE).filter(search)
+                            queryset = queryset.filter(search)
                     else:
                         for term in search.split():
                             criterions = (Q(**{'%s__icontains' % field: term}) for field in fields)
                             search = reduce(or_, criterions)
-                            queryset = queryset.using(self.DATABASE).filter(search)
+                            queryset = queryset.filter(search)
         return queryset
 
     def get_queryset(self):
