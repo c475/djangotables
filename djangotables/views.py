@@ -23,7 +23,7 @@ from django.utils.six.moves import reduce, xrange
 from django.views.generic import View
 from django.views.generic.list import MultipleObjectMixin
 
-from eztables.forms import DatatablesForm, DESC
+from djangotables.forms import DatatablesForm, DESC
 
 
 RE_FORMATTED = re.compile(r'\{(\w+)\}')
