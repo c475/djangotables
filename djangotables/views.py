@@ -21,7 +21,7 @@ from django.core.exceptions import PermissionDenied
 from django.utils.six import text_type
 from django.utils.six.moves import reduce, xrange
 from django.views.generic import View
-from django.views.generic.list import MultipleObjectMixin
+from djangotables.mixins.MultiObjectMixin import MultiObjectMixin
 
 from djangotables.forms import DatatablesForm, DESC
 
@@ -54,7 +54,7 @@ def get_real_field(model, field_name):
         raise Exception('Unhandled field: %s' % field_name)
 
 
-class DatatablesView(MultipleObjectMixin, View):
+class DatatablesView(MultiObjectMixin, View):
     model = None
     _db_fields = None
     fields = []
