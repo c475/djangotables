@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
+import operator
 import json
+import io
 import re
+import csv
+import types
+import datetime
+import pytz
+import hashlib
 
 from operator import or_
 
@@ -10,15 +17,14 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseBadRequest
+from django.core.exceptions import PermissionDenied
 from django.utils.six import text_type
 from django.utils.six.moves import reduce, xrange
 from django.views.generic import View
-
 from djangotables.mixins.MultiObjectMixin import MultiObjectMixin
+
 from djangotables.forms import DatatablesForm, DESC
 
-
-JSON_MIMETYPE = 'application/json'
 
 RE_FORMATTED = re.compile(r'\{(\w+)\}')
 
@@ -49,24 +55,93 @@ def get_real_field(model, field_name):
 
 
 class DatatablesView(MultiObjectMixin, View):
-    '''
-    Render a paginated server-side Datatables JSON view.
-
-    See: http://www.datatables.net/usage/server-side
-    '''
-    fields = []
+    model = None
     _db_fields = None
+    fields = []
+    sFilters = {}
+    timezone = pytz.UTC
+    view_access = True
+    download_access = False
+    download = False
+    download_type = 'csv'
+    download_filename = ''
 
-    def post(self, request, *args, **kwargs):
-        return self.process_dt_response(request.POST)
+    def load_filters(self, request_data):
+        try:
+            self.sFilters = json.loads('[' + request_data['sFilters'] + ']')[0]
+
+        except:
+            self.sFilters = {}
+
+        if len(self.sFilters) == 0:
+            return HttpResponseBadRequest()
+
+    def check_auth_list(self, request, access_list):
+        auth = False
+        if (
+            isinstance(access_list, bool) and
+            access_list is True
+        ):
+            auth = True
+
+        elif isinstance(access_list, list):
+            user_groups = request.user.groups.all()
+            for user_group in user_groups:
+                if user_group.pk in access_list:
+                    auth = True
+                    break
+
+        return auth
+
+    def check_auth(self, request, request_data):
+        auth = False
+        if request.user:
+            if self.download:
+                auth = self.check_auth_list(request, self.download_access)
+            else:
+                auth = self.check_auth_list(request, self.view_access)
+
+        if not auth:
+            raise PermissionDenied
+
+        else:
+            self.uid = request.user.pk
+            if request_data.get('mSearch', None) is not None:
+                self.sFilters['user__id'] = [self.uid]
+
+    def custom_processing(self, request_data, **kwargs):
+        pass
+
+    def process(self, request):
+        if request.method == 'GET':
+            request_data = request.GET.dict()
+        else:
+            request_data = request.POST.dict()
+        self.load_filters(request_data)
+        self.check_auth(request, request_data)
+        self.custom_processing(request_data)
+        return self.process_dt_response(request_data)
 
     def get(self, request, *args, **kwargs):
-        return self.process_dt_response(request.GET)
+        if not request.GET.__contains__('download'):
+            return HttpResponseBadRequest()
+
+        else:
+            self.download = True
+            self.download_filename = str(self.model) + '_' +  datetime.datetime.now().replace(microsecond=0).isoformat()
+            return self.process(request)
+
+    def post(self, request, *args, **kwargs):
+        if not request.is_ajax():
+            return HttpResponseBadRequest()
+
+        else:
+            return self.process(request)
 
     def process_dt_response(self, data):
         self.form = DatatablesForm(data)
         if self.form.is_valid():
-            self.object_list = self.get_queryset().values(*self.get_db_fields())
+            self.object_list = self.get_queryset().all()
             return self.render_to_response(self.form)
         else:
             return HttpResponseBadRequest()
@@ -88,7 +163,7 @@ class DatatablesView(MultiObjectMixin, View):
 
     def get_field(self, index):
         if isinstance(self.fields, dict):
-            return self.fields[self.dt_data['mDataProp_%s' % index]]
+            return self.fields[self.dt_data['columns[%s][data]' % index]]
         else:
             return self.fields[index]
 
@@ -102,13 +177,27 @@ class DatatablesView(MultiObjectMixin, View):
 
     def get_orders(self):
         '''Get ordering fields for ``QuerySet.order_by``'''
-        orders = []
-        iSortingCols = self.dt_data['iSortingCols']
-        dt_orders = [(self.dt_data['iSortCol_%s' % i], self.dt_data['sSortDir_%s' % i]) for i in xrange(iSortingCols)]
+        orders, dt_orders = [], []
+
+        i = 0
+        while i < len(self.dt_data):
+
+            if self.dt_data.get('order[%s][column]' % i, None) is not None:
+
+                dt_orders.append((
+                    self.dt_data['order[%s][column]' % i],
+                    self.dt_data['order[%s][dir]' % i]
+                ))
+
+            else:
+                break
+
+            i += 1
+
         for field_idx, field_dir in dt_orders:
             direction = '-' if field_dir == DESC else ''
-            if hasattr(self, 'sort_col_%s' % field_idx):
-                method = getattr(self, 'sort_col_%s' % field_idx)
+            if hasattr(self, 'order[%s][column]' % field_idx):
+                method = getattr(self, 'order[%s][column]' % field_idx)
                 result = method(direction)
                 if isinstance(result, (bytes, text_type)):
                     orders.append(result)
@@ -125,9 +214,9 @@ class DatatablesView(MultiObjectMixin, View):
 
     def global_search(self, queryset):
         '''Filter a queryset with global search'''
-        search = self.dt_data['sSearch']
+        search = self.dt_data['search']['value']
         if search:
-            if self.dt_data['bRegex']:
+            if self.dt_data['search']['regex']:
                 criterions = [
                     Q(**{'%s__iregex' % field: search})
                     for field in self.get_db_fields()
@@ -145,75 +234,213 @@ class DatatablesView(MultiObjectMixin, View):
 
     def column_search(self, queryset):
         '''Filter a queryset with column search'''
-        for idx in xrange(self.dt_data['iColumns']):
-            search = self.dt_data['sSearch_%s' % idx]
-            if search:
-                if hasattr(self, 'search_col_%s' % idx):
-                    custom_search = getattr(self, 'search_col_%s' % idx)
-                    queryset = custom_search(search, queryset)
-                else:
-                    field = self.get_field(idx)
-                    fields = RE_FORMATTED.findall(field) if RE_FORMATTED.match(field) else [field]
-                    if self.dt_data['bRegex_%s' % idx]:
-                        criterions = [Q(**{'%s__iregex' % field: search}) for field in fields if self.can_regex(field)]
-                        if len(criterions) > 0:
-                            search = reduce(or_, criterions)
-                            queryset = queryset.filter(search)
+
+        i = 0
+        while i < len(self.dt_data):
+
+            if self.dt_data.get('columns[%s][search][value]' % i, None) is not None:
+
+                search = self.dt_data['columns[%s][search][value]' % i]
+                if search:
+
+                    if hasattr(self, 'search_col_%s' % i):
+                        custom_search = getattr(self, 'search_col_%s' % i)
+                        queryset = custom_search(search, queryset)
+
                     else:
-                        for term in search.split():
-                            criterions = (Q(**{'%s__icontains' % field: term}) for field in fields)
-                            search = reduce(or_, criterions)
-                            queryset = queryset.filter(search)
+                        fieldT = self.get_field(i)
+                        fields = RE_FORMATTED.findall(fieldT) if RE_FORMATTED.match(fieldT) else [fieldT]
+                        if self.dt_data['columns[%s][search][regex]' % i]:
+
+                            criterions = [Q(**{'%s__iregex' % field: search}) for field in fields if self.can_regex(field)]
+                            if len(criterions) > 0:
+                                search = reduce(or_, criterions)
+                                queryset = queryset.filter(search)
+
+                        else:
+                            for term in search.split():
+                                criterions = (Q(**{'%s__icontains' % field: term}) for field in fields)
+                                search = reduce(or_, criterions)
+                                queryset = queryset.filter(search)
+
+            else:
+                break
+
+            i += 1
+
         return queryset
 
+    def filter_search(self, qs):
+        kwargs = {}
+        for key, value in self.sFilters.iteritems():
+            sKey = key.split(':')
+
+            filterList = True
+            if not isinstance(value, list):
+                value = [value]
+                filterList = False
+
+            for index, item in enumerate(value):
+                if isinstance(item, str) or isinstance(item, unicode):
+                    try:
+                        value[index] = self.timezone.localize(
+                            datetime.datetime.strptime(
+                                item, '%m/%d/%Y %I:%M %p'
+                            )
+                        ).astimezone(
+                            pytz.utc
+                        ).replace(
+                            tzinfo=None
+                        )
+
+                    except:
+                        if item.isdigit():
+                            value[index] = int(item)
+
+            if len(sKey) > 1:  # range search
+                if sKey[1] == 'from':
+                    kwargs[sKey[0] + '__gte'] = value[0]
+                elif sKey[1] == 'to':
+                    kwargs[sKey[0] + '__lt'] = value[0]
+
+            elif filterList:  # list search
+                args = []
+                for i in value:
+                    args.append(Q(**{sKey[0]: i}))
+
+                qs = qs.filter(reduce(operator.or_, args))
+
+            elif isinstance(value[0], types.BooleanType) or isinstance(
+                value[0], types.IntType
+            ):  # boolean search
+                if value[0] is True:
+                    kwargs[sKey[0] + '__gt'] = 0
+
+                else:
+                    kwargs[sKey[0]] = 0
+
+            else:  # text search
+                if sKey[0].endswith('sha256'):
+                    kwargs[sKey[0]] = hashlib.sha256(value[0]).hexdigest()
+                else:
+                    kwargs[sKey[0] + '__icontains'] = value[0]
+
+        if len(kwargs) > 0:
+            qs = qs.filter(**kwargs)
+
+        return qs
+
+    def adjust_search(self, qs):
+        return qs
+
     def get_queryset(self):
-        '''Apply Datatables sort and search criterion to QuerySet'''
         qs = super(DatatablesView, self).get_queryset()
-        # Perform global search
-        qs = self.global_search(qs)
-        # Perform column search
-        qs = self.column_search(qs)
-        # Return the ordered queryset
-        return qs.order_by(*self.get_orders())
+        #qs = self.global_search(qs)
+        #qs = self.column_search(qs)
+        qs = self.filter_search(qs)
+        return self.adjust_search(qs).order_by(*self.get_orders())
 
     def get_page(self, form):
-        '''Get the requested page'''
-        page_size = form.cleaned_data['iDisplayLength']
-        start_index = form.cleaned_data['iDisplayStart']
+        if self.download:
+            start_index = 0
+            page_size = len(self.object_list)
+
+        else:
+            start_index = int(form.cleaned_data['start'])
+            page_size = int(form.cleaned_data['length'])
+
         paginator = Paginator(self.object_list, page_size)
         num_page = (start_index / page_size) + 1
         return paginator.page(num_page)
 
     def get_rows(self, rows):
-        '''Format all rows'''
         return [self.get_row(row) for row in rows]
 
     def get_row(self, row):
-        '''Format a single row (if necessary)'''
+        ret = {}
+        for key, value in self.fields.items():
+            if RE_FORMATTED.match(value):
+                ret[key] = re.sub(
+                    '\{([^}]*)\}',
+                    lambda x: self.get_row_field(row, x.groups()[0]),
+                    value
+                )
 
-        if isinstance(self.fields, dict):
-            return dict([
-                (key, text_type(value).format(**row) if RE_FORMATTED.match(value) else row[value])
-                for key, value in self.fields.items()
-            ])
+            else:
+                ret[key] = self.get_row_field(row, value)
+
+        return ret
+
+    def get_row_field(self, row, field):
+        obj, count, secs = row, 0, field.split('__')
+        while count < len(secs):
+            if count == (len(secs) - 1):
+                return self.get_field_value(obj, secs[count])
+            else:
+                obj = getattr(obj, secs[count])
+                count += 1
+
+    def get_field_value(self, obj, field):
+        if hasattr(obj, field):
+            val = getattr(obj, field)
+            if str(type(val)).startswith('<type'):
+                return val
+            elif hasattr(val, 'id'):
+                return getattr(val, 'id')
+            else:
+                return "ERROR"
         else:
-            return [text_type(field).format(**row) if RE_FORMATTED.match(field)
-                    else row[field]
-                    for field in self.fields]
+            return None
+
+    def format_response(self, dList):
+        return (dList, [])
 
     def render_to_response(self, form, **kwargs):
-        '''Render Datatables expected JSON format'''
         page = self.get_page(form)
-        data = {
-            'iTotalRecords': page.paginator.count,
-            'iTotalDisplayRecords': page.paginator.count,
-            'sEcho': form.cleaned_data['sEcho'],
-            'aaData': self.get_rows(page.object_list),
-        }
-        return self.json_response(data)
+        dList, headers = self.format_response(self.get_rows(page.object_list))
+        if self.download:
+            if self.download_type == 'csv':
+                output = io.BytesIO()
+                w = csv.writer(output)
+                header = False
+                for d in dList:
+                    keys, row = [], []
+                    for i in d:
+                        try:
+                            row.append(str(d[i]).encode('utf-8'))
 
-    def json_response(self, data):
-        return HttpResponse(
-            json.dumps(data, cls=DjangoJSONEncoder),
-            content_type=JSON_MIMETYPE
-        )
+                        except:
+                            row.append(d[i].encode('utf-8'))
+
+                        keys.append(i)
+    
+                    if not header:
+                        if len(headers) > 0:
+                            keys = headers
+                        w.writerow(keys)
+                        header = True
+    
+                    w.writerow(row)
+    
+                response = HttpResponse(
+                    output.getvalue(),
+                    content_type='text/csv'
+                )
+
+            response[
+                'Content-Disposition'
+            ] = 'attachment; filename="' + self.download_filename + '.' + self.download_type + '"'
+
+            return response
+
+        else:
+            return HttpResponse(
+                json.dumps({
+                    'recordsTotal': page.paginator.count,
+                    'recordsFiltered': page.paginator.count,
+                    'draw': int(form.cleaned_data['draw']),
+                    'data': dList
+                }, cls=DjangoJSONEncoder),
+                content_type='application/json'
+            )
+
