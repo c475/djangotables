@@ -308,7 +308,8 @@ class DatatablesView(MultiObjectMixin, View):
                 for i in value:
                     args.append(Q(**{sKey[0]: i}))
 
-                qs = qs.filter(reduce(operator.or_, args))
+                if len(args) > 0:
+                    qs = qs.filter(reduce(operator.or_, args))
 
             elif isinstance(value[0], types.BooleanType) or isinstance(
                 value[0], types.IntType
